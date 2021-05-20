@@ -2,19 +2,18 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdbool.h>
-#include <float.h>
 
 #include "hashmap.h"
 
-struct bucket {
+struct bucket_node {
     void *key;
-    struct bucket *next;
+    struct bucket_node *next;
     unsigned long long hash;
 };
 
 struct hashmap {
     struct hashmap_allocator allocator;
-    struct bucket **bucket_array;
+    struct bucket_node **bucket_array;
     unsigned long long (*get_hash)(void *);
     int (*compare)(void *, void *);
     void (*free_key)(void *);
@@ -23,14 +22,15 @@ struct hashmap {
     size_t cur_size;
     size_t num_elements;
     size_t element_size;
+    size_t num_elements_grow;
     double load_factor;
     bool copy_elements;
 };
 
-static struct bucket **hashmap_allocate_bucket_array(struct hashmap_allocator *allocator, size_t num_buckets) {
-    struct bucket **bucket_array;
+static struct bucket_node **hashmap_allocate_bucket_array(struct hashmap_allocator *allocator, size_t num_buckets) {
+    struct bucket_node **bucket_array;
     size_t i;
-    bucket_array = allocator->alloc(sizeof(struct bucket *) * num_buckets);
+    bucket_array = allocator->alloc(sizeof(struct bucket_node *) * num_buckets);
     if (bucket_array == NULL) {
         return NULL;
     }
@@ -49,6 +49,7 @@ HashMap *hashmap_new(struct hashmap_config *config) {
     hashmap->allocator = config->allocator;
     hashmap->get_hash = config->get_hash;
     hashmap->compare = config->compare;
+    hashmap->free_key = config->free_key;
     hashmap->sizes = hashmap->allocator.alloc(sizeof(size_t) * config->num_sizes);
     if (hashmap->sizes == NULL) {
         config->allocator.free(hashmap);
@@ -58,6 +59,7 @@ HashMap *hashmap_new(struct hashmap_config *config) {
     hashmap->num_sizes = config->num_sizes;
     hashmap->load_factor = config->load_factor;
     hashmap->cur_size = 0;
+    hashmap->num_elements_grow = hashmap->sizes[hashmap->cur_size] * hashmap->load_factor;
     hashmap->bucket_array = hashmap_allocate_bucket_array(&hashmap->allocator, hashmap->sizes[hashmap->cur_size]);
     if (hashmap->bucket_array == NULL) {
         config->allocator.free(hashmap->sizes);
@@ -72,21 +74,22 @@ HashMap *hashmap_new(struct hashmap_config *config) {
     return hashmap;
 }
 
-static struct bucket *hashmap_bucket_create(struct hashmap_allocator *allocator, void *key, unsigned long long hash) {
-    struct bucket *bucket;
-    bucket = allocator->alloc(sizeof(struct bucket));
-    if (bucket == NULL) {
+static struct bucket_node *hashmap_bucket_node_create(struct hashmap_allocator *allocator, 
+                                                    void *key, unsigned long long hash) {
+    struct bucket_node *node;
+    node = allocator->alloc(sizeof(struct bucket_node));
+    if (node == NULL) {
         return NULL;
     }
-    bucket->key = key;
-    bucket->hash = hash;
-    bucket->next = NULL;
-    return bucket;
+    node->key = key;
+    node->hash = hash;
+    node->next = NULL;
+    return node;
 }
 
-static int hashmap_add_key_to_chain(HashMap *hashmap, void *key, struct bucket **chain, unsigned long long hash) {
-    struct bucket *cur_node, *new_node;
-    cur_node = *chain;
+static int hashmap_add_key_to_bucket(HashMap *hashmap, void *key, struct bucket_node **bucket, unsigned long long hash) {
+    struct bucket_node *cur_node, *new_node;
+    cur_node = *bucket;
     while (cur_node != NULL && cur_node->next != NULL) {
         if (hashmap->compare(cur_node->key, key) == 0) {
             hashmap->free_key(cur_node->key);
@@ -98,12 +101,12 @@ static int hashmap_add_key_to_chain(HashMap *hashmap, void *key, struct bucket *
         }
         cur_node = cur_node->next;
     }
-    new_node = hashmap_bucket_create(&hashmap->allocator, key, hash);
+    new_node = hashmap_bucket_node_create(&hashmap->allocator, key, hash);
     if (new_node == NULL) {
         return -1;
     }
     if (cur_node == NULL) {
-        *chain = new_node;
+        *bucket = new_node;
     } else {
         cur_node->next = new_node;
     }
@@ -126,7 +129,7 @@ static void *hashmap_get_key_to_use(HashMap *hashmap, void *key) {
 }
 
 static int hashmap_add_key(HashMap *hashmap, void *key) {
-    struct bucket **chain;
+    struct bucket_node **bucket;
     void *key_to_use;
     size_t index;
     unsigned long long hash;
@@ -136,8 +139,8 @@ static int hashmap_add_key(HashMap *hashmap, void *key) {
     }
     hash = hashmap->get_hash(key_to_use);
     index = hash % hashmap->sizes[hashmap->cur_size];
-    chain = hashmap->bucket_array + index;
-    if (hashmap_add_key_to_chain(hashmap, key_to_use, chain, hash) < 0) {
+    bucket = hashmap->bucket_array + index;
+    if (hashmap_add_key_to_bucket(hashmap, key_to_use, bucket, hash) < 0) {
         if (key != key_to_use) {
             hashmap->allocator.free(key_to_use);
         }
@@ -146,38 +149,38 @@ static int hashmap_add_key(HashMap *hashmap, void *key) {
     return 0;
 }
 
-static void hashmap_add_bucket_to_chain(HashMap *hashmap, struct bucket **chain, struct bucket *node) {
-    struct bucket *cur_node;
-    if (*chain == NULL) {
-        *chain = node;
+static void hashmap_add_node_to_bucket(HashMap *hashmap, struct bucket_node **bucket, struct bucket_node *node) {
+    struct bucket_node *cur_node;
+    if (*bucket == NULL) {
+        *bucket = node;
         return;
     }
-    cur_node = *chain;
+    cur_node = *bucket;
     while (cur_node->next != NULL) {
         cur_node = cur_node->next;
     }
     cur_node->next = node;
 }
 
-static void hashmap_rehash(HashMap *hashmap, struct bucket **bucket_array, size_t size) {
+static void hashmap_rehash(HashMap *hashmap, struct bucket_node **bucket_array, size_t size) {
     size_t i;
     for (i = 0; i < size; ++i) {
-        struct bucket *cur_node;
+        struct bucket_node *cur_node;
         cur_node = bucket_array[i];
         while (cur_node != NULL) {
-            struct bucket *next_node;
+            struct bucket_node *next_node;
             size_t index;
             next_node = cur_node->next;
             cur_node->next = NULL;
             index = cur_node->hash % hashmap->sizes[hashmap->cur_size];
-            hashmap_add_bucket_to_chain(hashmap, (hashmap->bucket_array + index), cur_node);
+            hashmap_add_node_to_bucket(hashmap, (hashmap->bucket_array + index), cur_node);
             cur_node = next_node;
         }
     }
 }
 
 static int hashmap_resize(HashMap *hashmap) {
-    struct bucket **new_bucket_array, **old_bucket_array;
+    struct bucket_node **new_bucket_array, **old_bucket_array;
     if (hashmap->cur_size == hashmap->num_sizes - 1) {
         return 0;
     }
@@ -189,32 +192,33 @@ static int hashmap_resize(HashMap *hashmap) {
     ++hashmap->cur_size;
     old_bucket_array = hashmap->bucket_array;
     hashmap->bucket_array = new_bucket_array;
+    hashmap->num_elements_grow = hashmap->sizes[hashmap->cur_size] * hashmap->load_factor;
     hashmap_rehash(hashmap, old_bucket_array, hashmap->sizes[hashmap->cur_size - 1]);
     hashmap->allocator.free(old_bucket_array);
     return 0;
 }
 
-static struct bucket *hashmap_find_in_chain(HashMap *hashmap, struct bucket **chain, void *key) {
-    struct bucket *cur_bucket;
-    cur_bucket = *chain;
-    while (cur_bucket != NULL && hashmap->compare(cur_bucket->key, key) != 0) {
-        cur_bucket = cur_bucket->next;
+static struct bucket_node *hashmap_find_in_bucket(HashMap *hashmap, struct bucket_node **bucket, void *key) {
+    struct bucket_node *cur_node;
+    cur_node = *bucket;
+    while (cur_node != NULL && hashmap->compare(cur_node->key, key) != 0) {
+        cur_node = cur_node->next;
     }
-    return cur_bucket;
+    return cur_node;
 }
 
 void *hashmap_get(HashMap *hashmap, void *key) {
-    struct bucket **chain, *found;
+    struct bucket_node **bucket, *found;
     size_t hash, index;
     hash = hashmap->get_hash(key);
     index = hash % hashmap->sizes[hashmap->cur_size];
-    chain = hashmap->bucket_array + index;
-    found = hashmap_find_in_chain(hashmap, chain, key);
+    bucket = hashmap->bucket_array + index;
+    found = hashmap_find_in_bucket(hashmap, bucket, key);
     return found == NULL ? NULL : found->key;
 }
 
 int hashmap_set(HashMap *hashmap, void *key) {
-    if (((double)hashmap->num_elements / (double)hashmap->sizes[hashmap->cur_size]) > hashmap->load_factor) {
+    if (hashmap->num_elements == hashmap->num_elements_grow) {
         if (hashmap_resize(hashmap) < 0) {
             return -1;
         }

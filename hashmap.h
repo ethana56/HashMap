@@ -8,7 +8,6 @@ typedef struct hashmap HashMap;
 
 struct hashmap_allocator {
     void *(*alloc)(size_t);
-    void *(*realloc)(void *, size_t);
     void (*free)(void *);
 };
 
@@ -25,7 +24,7 @@ struct hashmap_config {
 };
 
 HashMap *hashmap_new(struct hashmap_config *);
-void *hashmap_get(HashMap *, void *);
-int hashmap_set(HashMap *, void *);
+void *hashmap_get(HashMap *, void *key);
+int hashmap_set(HashMap *, void *key);
 
 #endif
