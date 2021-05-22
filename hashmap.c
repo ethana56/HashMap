@@ -326,6 +326,9 @@ static void hashmap_add_element_to_array(void *array,
 void *hashmap_to_list(HashMap *hashmap, size_t *num_elements) {
     void *array;
     size_t i, cur_element, hashmap_size;
+    if (hashmap->num_elements == 0) {
+        return NULL;
+    }
     array = hashmap->allocator.alloc(hashmap->element_size * hashmap->num_elements);
     if (array == NULL) {
         return NULL;
