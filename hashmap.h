@@ -25,10 +25,13 @@ struct hashmap_config {
 };
 
 HashMap *hashmap_new(struct hashmap_config *);
+void hashmap_free(HashMap *);
 void *hashmap_get(HashMap *, void *key);
 int hashmap_set(HashMap *, void *key);
 void *hashmap_to_list(HashMap *, size_t *);
 HashMapIterator *hashmap_get_iterator(HashMap *);
+HashMapIterator *hashmap_to_iterator(HashMap *);
+void hashmap_iterator_free(HashMapIterator *);
 void *hashmap_iterator_next(HashMapIterator *);
 
 #endif

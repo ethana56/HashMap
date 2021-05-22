@@ -31,6 +31,7 @@ struct hashmap_iterator {
     HashMap *hashmap;
     struct bucket_node *cur_node;
     size_t index;
+    bool free_when_done;
 };
 
 static struct bucket_node **hashmap_allocate_bucket_array(struct hashmap_allocator *allocator, size_t num_buckets) {
@@ -251,8 +252,12 @@ static void hashmap_free_internal(HashMap *hashmap, bool call_free_key) {
         while (cur_node != NULL) {
             struct bucket_node *next_node;
             next_node = cur_node->next;
-            if (call_free_key) hashmap->free_key(cur_node->key);
-            if (hashmap->copy_elements) hashmap->allocator.free(cur_node->key);
+            if (call_free_key) {
+                hashmap->free_key(cur_node->key);
+                if (hashmap->copy_elements) {
+                    hashmap->allocator.free(cur_node->key);
+                }
+            }
             hashmap->allocator.free(cur_node);
             cur_node = next_node;
         }
@@ -272,10 +277,11 @@ static void hashmap_iterator_find_next_bucket(HashMapIterator *iterator) {
     if (iterator->index >= iterator->hashmap->sizes[iterator->hashmap->cur_size]) {
         return;
     }
+    
     iterator->cur_node = iterator->hashmap->bucket_array[iterator->index];
 }
 
-static void hashmap_iterator_initiate(HashMapIterator *iterator, HashMap *hashmap) {
+static void hashmap_iterator_initiate(HashMapIterator *iterator, HashMap *hashmap, bool free_when_done) {
     iterator->hashmap = hashmap;
     iterator->index = 0;
     if (iterator->hashmap->bucket_array[iterator->index] == NULL) {
@@ -283,6 +289,7 @@ static void hashmap_iterator_initiate(HashMapIterator *iterator, HashMap *hashma
     } else {
         iterator->cur_node = iterator->hashmap->bucket_array[iterator->index];
     }
+    iterator->free_when_done = free_when_done;
 }
 
 static void hashmap_iterator_find_next_node(HashMapIterator *iterator) {
@@ -305,14 +312,33 @@ void *hashmap_iterator_next(HashMapIterator *iterator) {
     return key;
 }
 
+HashMapIterator *hashmap_to_iterator(HashMap *hashmap) {
+    HashMapIterator *iterator;
+    iterator = hashmap->allocator.alloc(sizeof(HashMapIterator));
+    if (iterator == NULL) {
+        return NULL;
+    }
+    hashmap_iterator_initiate(iterator, hashmap, true);
+    return iterator;
+}
+
 HashMapIterator *hashmap_get_iterator(HashMap *hashmap) {
     HashMapIterator *iterator;
     iterator = hashmap->allocator.alloc(sizeof(HashMapIterator));
     if (iterator == NULL) {
         return NULL;
     }
-    hashmap_iterator_initiate(iterator, hashmap);
+    hashmap_iterator_initiate(iterator, hashmap, false);
     return iterator;
+}
+
+void hashmap_iterator_free(HashMapIterator *iterator) {
+    void (*allocator_free)(void *);
+    allocator_free = iterator->hashmap->allocator.free;
+    if (iterator->free_when_done) {
+        hashmap_free(iterator->hashmap);
+    }
+    allocator_free(iterator);
 }
 
 static void hashmap_add_element_to_array(void *array, 
@@ -326,9 +352,6 @@ static void hashmap_add_element_to_array(void *array,
 void *hashmap_to_list(HashMap *hashmap, size_t *num_elements) {
     void *array;
     size_t i, cur_element, hashmap_size;
-    if (hashmap->num_elements == 0) {
-        return NULL;
-    }
     array = hashmap->allocator.alloc(hashmap->element_size * hashmap->num_elements);
     if (array == NULL) {
         return NULL;
