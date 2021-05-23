@@ -133,18 +133,22 @@ static void *hashmap_get_key_to_use(HashMap *hashmap, void *key) {
     return key_to_use;
 }
 
+static struct bucket_node **hashmap_get_bucket(HashMap *hashmap, unsigned long long hash) {
+    size_t index;
+    index = hash % hashmap->sizes[hashmap->cur_size];
+    return hashmap->bucket_array + index;
+}
+
 static int hashmap_add_key(HashMap *hashmap, void *key) {
     struct bucket_node **bucket;
-    void *key_to_use;
-    size_t index;
     unsigned long long hash;
+    void *key_to_use;
     key_to_use = hashmap_get_key_to_use(hashmap, key);
     if (key_to_use == NULL) {
         return -1;
     }
     hash = hashmap->get_hash(key_to_use);
-    index = hash % hashmap->sizes[hashmap->cur_size];
-    bucket = hashmap->bucket_array + index;
+    bucket = hashmap_get_bucket(hashmap, hash);
     if (hashmap_add_key_to_bucket(hashmap, key_to_use, bucket, hash) < 0) {
         if (key != key_to_use) {
             hashmap->allocator.free(key_to_use);
@@ -212,12 +216,17 @@ static struct bucket_node *hashmap_find_in_bucket(HashMap *hashmap, struct bucke
     return cur_node;
 }
 
+static void hashmap_bucket_node_free(HashMap *hashmap, struct bucket_node *node) {
+    hashmap->free_key(node->key);
+    if (hashmap->copy_elements) {
+        hashmap->allocator.free(node->key);
+    }
+    hashmap->allocator.free(node);
+}
+
 void *hashmap_get(HashMap *hashmap, void *key) {
     struct bucket_node **bucket, *found;
-    size_t hash, index;
-    hash = hashmap->get_hash(key);
-    index = hash % hashmap->sizes[hashmap->cur_size];
-    bucket = hashmap->bucket_array + index;
+    bucket = hashmap_get_bucket(hashmap, hashmap->get_hash(key));
     found = hashmap_find_in_bucket(hashmap, bucket, key);
     return found == NULL ? NULL : found->key;
 }
@@ -231,6 +240,34 @@ int hashmap_set(HashMap *hashmap, void *key) {
     return hashmap_add_key(hashmap, key);
 }
 
+static void hashmap_remove_key_from_bucket(HashMap *hashmap, struct bucket_node **bucket, void *key) {
+    struct bucket_node *found;
+    if (*bucket == NULL) {
+        return;
+    }
+    if (hashmap->compare((*bucket)->key, key) == 0) {
+        found = *bucket;
+        *bucket = found->next;
+    } else {
+        struct bucket_node *cur_node;
+        cur_node = *bucket;
+        while (cur_node != NULL) {
+            if (cur_node->next != NULL && hashmap->compare(cur_node->next->key, key) == 0) {
+                break;
+            }
+            cur_node = cur_node->next;
+        }
+        found = cur_node->next;
+        cur_node->next = cur_node->next->next;
+    }
+    hashmap_bucket_node_free(hashmap, found);
+}
+
+void hashmap_remove(HashMap *hashmap, void *key) {
+    struct bucket_node **bucket;
+    bucket = hashmap_get_bucket(hashmap, hashmap->get_hash(key));
+    hashmap_remove_key_from_bucket(hashmap, bucket, key);
+}
 
 /* return value will be greater than or equal to hashmap size when there are no more buckets */
 static size_t hashmap_find_next_bucket_index(HashMap *hashmap, size_t index) {
